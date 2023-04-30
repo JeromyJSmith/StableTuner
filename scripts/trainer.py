@@ -100,7 +100,7 @@ def parse_args():
     parser.add_argument("--conditional_dropout", type=float, default=None,required=False, help="Conditional dropout probability")
     parser.add_argument('--disable_cudnn_benchmark', default=False, action="store_true")
     parser.add_argument('--use_text_files_as_captions', default=False, action="store_true")
-    
+
     parser.add_argument(
             "--sample_from_batch",
             type=int,
@@ -392,7 +392,7 @@ def parse_args():
     parser.add_argument('--add_mask_prompt', type=str, default=None, action="append", dest="mask_prompts", help="Prompt for automatic mask creation")
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
+    if env_local_rank not in [-1, args.local_rank]:
         args.local_rank = env_local_rank
 
     return args
@@ -668,15 +668,18 @@ def get_aspect_buckets(resolution,mode=''):
         raise ValueError("Resolution must be at least 512")
     try: 
         rounded_resolution = int(resolution / 64) * 64
-        print(f" {bcolors.WARNING} Rounded resolution to: {rounded_resolution}{bcolors.ENDC}")   
+        print(f" {bcolors.WARNING} Rounded resolution to: {rounded_resolution}{bcolors.ENDC}")
         all_image_sizes = __get_all_aspects()
         if mode == 'MJ':
             #truncate to the first 3 resolutions
-            all_image_sizes = [x[0:3] for x in all_image_sizes]
-        aspects = next(filter(lambda sizes: sizes[0][0]==rounded_resolution, all_image_sizes), None)
-        ASPECTS = aspects
-        #print(aspects)
-        return aspects
+            all_image_sizes = [x[:3] for x in all_image_sizes]
+        return next(
+            filter(
+                lambda sizes: sizes[0][0] == rounded_resolution,
+                all_image_sizes,
+            ),
+            None,
+        )
     except Exception as e:
         print(f" {bcolors.FAIL} *** Could not find selected resolution: {rounded_resolution}{bcolors.ENDC}")   
 
@@ -772,14 +775,14 @@ class AutoBucketing(Dataset):
         #print(self.image_train_items)
         if self.with_prior_loss and self.add_class_images_to_dataset == False:
             self.image_train_items, self.class_train_items = shared_dataloader.get_all_images()
-            self.num_train_images = self.num_train_images + len(self.image_train_items)
-            self.num_reg_images = self.num_reg_images + len(self.class_train_items)
+            self.num_train_images += len(self.image_train_items)
+            self.num_reg_images += len(self.class_train_items)
             self._length = max(max(math.trunc(self.num_train_images * repeats), batch_size),math.trunc(self.num_reg_images * repeats), batch_size) - self.num_train_images % self.batch_size
-            self.num_train_images = self.num_train_images + self.num_reg_images
-            
+            self.num_train_images += self.num_reg_images
+
         else:
             self.image_train_items = shared_dataloader.get_all_images()
-            self.num_train_images = self.num_train_images + len(self.image_train_items)
+            self.num_train_images += len(self.image_train_items)
             self._length = max(math.trunc(self.num_train_images * repeats), batch_size) - self.num_train_images % self.batch_size
 
         print()
@@ -870,8 +873,8 @@ class ImageTrainItem():
         self.caption = caption
         self.target_wh = target_wh
         self.pathname = pathname
-        self.mask_pathname = os.path.splitext(pathname)[0] + "-masklabel.png"
-        self.depth_pathname = os.path.splitext(pathname)[0] + "-depth.png"
+        self.mask_pathname = f"{os.path.splitext(pathname)[0]}-masklabel.png"
+        self.depth_pathname = f"{os.path.splitext(pathname)[0]}-depth.png"
         self.flip_p = flip_p
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
         self.cropped_img = None
@@ -1048,54 +1051,48 @@ class DataLoaderMultiAspect():
         self.extra_module = extra_module
         self.load_mask = load_mask
         prepared_train_data = []
-        
+
         self.aspects = get_aspect_buckets(resolution)
         #print(f"* DLMA resolution {resolution}, buckets: {self.aspects}")
         #process sub directories flag
-            
+
         print(f" {bcolors.WARNING} Preloading images...{bcolors.ENDC}")   
 
         if balance_datasets:
-            print(f" {bcolors.WARNING} Balancing datasets...{bcolors.ENDC}") 
+            print(f" {bcolors.WARNING} Balancing datasets...{bcolors.ENDC}")
             #get the concept with the least number of images in instance_data_dir
             for concept in concept_list:
                 count = 0
-                if 'use_sub_dirs' in concept:
-                    if concept['use_sub_dirs'] == 1:
-                        tot = 0
-                        for root, dirs, files in os.walk(concept['instance_data_dir']):
-                            tot += len(files)
-                        count = tot
-                    else:
-                        count = len(os.listdir(concept['instance_data_dir']))
+                if 'use_sub_dirs' in concept and concept['use_sub_dirs'] == 1:
+                    tot = sum(
+                        len(files)
+                        for root, dirs, files in os.walk(
+                            concept['instance_data_dir']
+                        )
+                    )
+                    count = tot
                 else:
                     count = len(os.listdir(concept['instance_data_dir']))
                 print(f"{concept['instance_data_dir']} has count of {count}")
                 concept['count'] = count
-                
+
             min_concept = min(concept_list, key=lambda x: x['count'])
             #get the number of images in the concept with the least number of images
             min_concept_num_images = min_concept['count']
             print(" Min concept: ",min_concept['instance_data_dir']," with ",min_concept_num_images," images")
-            
+
             balance_cocnept_list = []
             for concept in concept_list:
                 #if concept has a key do not balance it
-                if 'do_not_balance' in concept:
-                    if concept['do_not_balance'] == True:
-                        balance_cocnept_list.append(-1)
-                    else:
-                        balance_cocnept_list.append(min_concept_num_images)
+                if (
+                    'do_not_balance' in concept
+                    and concept['do_not_balance'] == True
+                ):
+                    balance_cocnept_list.append(-1)
                 else:
-                        balance_cocnept_list.append(min_concept_num_images)
+                    balance_cocnept_list.append(min_concept_num_images)
         for concept in concept_list:
-            if 'use_sub_dirs' in concept:
-                if concept['use_sub_dirs'] == True:
-                    use_sub_dirs = True
-                else:
-                    use_sub_dirs = False
-            else:
-                use_sub_dirs = False
+            use_sub_dirs = 'use_sub_dirs' in concept and concept['use_sub_dirs'] == True
             self.image_paths = []
             #self.class_image_paths = []
             min_concept_num_images = None
@@ -1107,23 +1104,29 @@ class DataLoaderMultiAspect():
             concept_class_prompt = concept['class_prompt']
             if 'flip_p' in concept.keys():
                 flip_p = concept['flip_p']
-                if flip_p == '':
-                    flip_p = 0.0
-                else:
-                    flip_p = float(flip_p)
+                flip_p = 0.0 if flip_p == '' else float(flip_p)
             self.__recurse_data_root(self=self, recurse_root=data_root,use_sub_dirs=use_sub_dirs)
             random.Random(self.seed).shuffle(self.image_paths)
             if self.model_variant == 'depth2img':
                 print(f" {bcolors.WARNING} ** Loading Depth2Img Pipeline To Process Dataset{bcolors.ENDC}")
                 self.vae_scale_factor = self.extra_module.depth_images(self.image_paths)
-            prepared_train_data.extend(self.__prescan_images(debug_level, self.image_paths, flip_p,use_image_names_as_captions,concept_prompt,use_text_files_as_captions=self.use_text_files_as_captions)[0:min_concept_num_images]) # ImageTrainItem[]
+            prepared_train_data.extend(
+                self.__prescan_images(
+                    debug_level,
+                    self.image_paths,
+                    flip_p,
+                    use_image_names_as_captions,
+                    concept_prompt,
+                    use_text_files_as_captions=self.use_text_files_as_captions,
+                )[:min_concept_num_images]
+            )
             if add_class_images_to_dataset:
                 self.image_paths = []
                 self.__recurse_data_root(self=self, recurse_root=data_root_class,use_sub_dirs=use_sub_dirs)
                 random.Random(self.seed).shuffle(self.image_paths)
                 use_image_names_as_captions = False
                 prepared_train_data.extend(self.__prescan_images(debug_level, self.image_paths, flip_p,use_image_names_as_captions,concept_class_prompt,use_text_files_as_captions=self.use_text_files_as_captions)) # ImageTrainItem[]
-            
+
         self.image_caption_pairs = self.__bucketize_images(prepared_train_data, batch_size=batch_size, debug_level=debug_level,aspect_mode=self.aspect_mode,action_preference=self.action_preference)
         if self.with_prior_loss and add_class_images_to_dataset == False:
             self.class_image_caption_pairs = []
@@ -1146,7 +1149,7 @@ class DataLoaderMultiAspect():
             del clip_seg
         if debug_level > 0: print(f" * DLMA Example: {self.image_caption_pairs[0]} images")
         #print the length of image_caption_pairs
-        print(f" {bcolors.WARNING} Number of image-caption pairs: {len(self.image_caption_pairs)}{bcolors.ENDC}") 
+        print(f" {bcolors.WARNING} Number of image-caption pairs: {len(self.image_caption_pairs)}{bcolors.ENDC}")
         if len(self.image_caption_pairs) == 0:
             raise Exception("All the buckets are empty. Please check your data or reduce the batch size.")
     def get_all_images(self):
@@ -1159,14 +1162,14 @@ class DataLoaderMultiAspect():
         Create ImageTrainItem objects with metadata for hydration later 
         """
         decorated_image_train_items = []
-        
+
         for pathname in image_paths:
-            identifier = concept 
+            identifier = concept
             if use_image_names_as_captions:
                 caption_from_filename = os.path.splitext(os.path.basename(pathname))[0].split("_")[0]
                 identifier = caption_from_filename
             if use_text_files_as_captions:
-                txt_file_path = os.path.splitext(pathname)[0] + ".txt"
+                txt_file_path = f"{os.path.splitext(pathname)[0]}.txt"
 
                 if os.path.exists(txt_file_path):
                     try:
@@ -1175,12 +1178,11 @@ class DataLoaderMultiAspect():
                             f.close()
                             if len(identifier) < 1:
                                 raise ValueError(f" *** Could not find valid text in: {txt_file_path}")
-                            
+
                     except Exception as e:
-                        print(f" {bcolors.FAIL} *** Error reading {txt_file_path} to get caption, falling back to filename{bcolors.ENDC}") 
+                        print(f" {bcolors.FAIL} *** Error reading {txt_file_path} to get caption, falling back to filename{bcolors.ENDC}")
                         print(e)
                         identifier = caption_from_filename
-                        pass
             #print("identifier: ",identifier)
             image = Image.open(pathname)
             width, height = image.size
